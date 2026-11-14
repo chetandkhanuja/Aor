@@ -28,6 +28,62 @@ def get_comparison(order_id: str) -> list[RoutePlan]:
     return compare_order(order_id, get_data())
 
 
+def _route_animation_frames(
+    path: tuple[tuple[float, float], ...],
+    progress_trace: int,
+    picker_trace: int,
+) -> list[go.Frame]:
+    if len(path) < 2:
+        return []
+
+    segments = []
+    total_distance = 0.0
+    for first, second in zip(path, path[1:]):
+        length = abs(second[0] - first[0]) + abs(second[1] - first[1])
+        if length:
+            segments.append((first, second, total_distance, length))
+            total_distance += length
+    if total_distance == 0:
+        return []
+
+    frame_distances = [index * 0.5 for index in range(int(total_distance * 2))]
+    frame_distances.append(total_distance)
+    frames = []
+    for index, distance in enumerate(frame_distances):
+        distance = min(distance, total_distance)
+        position = path[0]
+        traveled = [path[0]]
+        for start, finish, start_distance, length in segments:
+            end_distance = start_distance + length
+            if distance >= end_distance:
+                position = finish
+                if traveled[-1] != finish:
+                    traveled.append(finish)
+                continue
+            fraction = (distance - start_distance) / length
+            position = (
+                start[0] + (finish[0] - start[0]) * fraction,
+                start[1] + (finish[1] - start[1]) * fraction,
+            )
+            if traveled[-1] != position:
+                traveled.append(position)
+            break
+        frames.append(
+            go.Frame(
+                name=str(index),
+                data=[
+                    go.Scatter(
+                        x=[point[0] for point in traveled],
+                        y=[point[1] for point in traveled],
+                    ),
+                    go.Scatter(x=[position[0]], y=[position[1]]),
+                ],
+                traces=[progress_trace, picker_trace],
+            )
+        )
+    return frames
+
+
 st.set_page_config(
     page_title="Warehouse Picker Route Optimizer",
     page_icon="📦",
@@ -205,6 +261,20 @@ with route_tab:
             else f"{(plan.distance / mip_distance - 1) * 100:.1f}% above MIP"
         )
     )
+    st.caption(
+        "Press ▶ Play picker to follow the route. Numbered bays are the pick "
+        "stops; arrows show the travel direction."
+    )
+
+    demand_by_sku = dict(zip(order_lines["SKU"], order_lines["Demand"]))
+    skus_by_location: dict[str, list[str]] = {}
+    for sku, location in plan.selected_locations.items():
+        skus_by_location.setdefault(location, []).append(
+            f"{sku} × {demand_by_sku[sku]}"
+        )
+    location_order = {
+        location: index for index, location in enumerate(plan.visit_order, start=1)
+    }
 
     figure = go.Figure()
     aisle_lines = (
@@ -212,74 +282,193 @@ with route_tab:
         .drop_duplicates()
         .sort_values("aisle_number")
     )
+    figure.add_shape(
+        type="rect",
+        x0=0,
+        x1=20,
+        y0=-0.38,
+        y1=0.38,
+        fillcolor="#d8eef0",
+        line={"width": 0},
+        layer="below",
+    )
+    figure.add_shape(
+        type="rect",
+        x0=0,
+        x1=20,
+        y0=10.62,
+        y1=11.38,
+        fillcolor="#d8eef0",
+        line={"width": 0},
+        layer="below",
+    )
     for row in aisle_lines.itertuples(index=False):
-        figure.add_trace(
-            go.Scatter(
-                x=[row.x, row.x],
-                y=[0, 11],
-                mode="lines",
-                line={"color": "#e1e8ef", "width": 18},
-                hoverinfo="skip",
-                showlegend=False,
+        for side_offset in (-0.52, 0.52):
+            figure.add_shape(
+                type="rect",
+                x0=row.x + side_offset - 0.22,
+                x1=row.x + side_offset + 0.22,
+                y0=0.5,
+                y1=10.5,
+                fillcolor="#e8edf2",
+                line={"color": "#d2dbe4", "width": 1},
+                layer="below",
             )
+            for position in range(1, 11):
+                figure.add_shape(
+                    type="line",
+                    x0=row.x + side_offset - 0.22,
+                    x1=row.x + side_offset + 0.22,
+                    y0=position + 0.5,
+                    y1=position + 0.5,
+                    line={"color": "#c7d2dc", "width": 1},
+                    layer="below",
+                )
+        figure.add_shape(
+            type="rect",
+            x0=row.x - 0.2,
+            x1=row.x + 0.2,
+            y0=0,
+            y1=11,
+            fillcolor="#f9fbfc",
+            line={"width": 0},
+            layer="below",
         )
-    for y in (0, 11):
-        figure.add_trace(
-            go.Scatter(
-                x=[0, 20],
-                y=[y, y],
-                mode="lines",
-                line={"color": "#7b8fa3", "width": 4},
-                name="Cross aisle",
-                legendgroup="cross-aisle",
-                showlegend=y == 0,
-                hoverinfo="skip",
-            )
+        figure.add_annotation(
+            x=row.x,
+            y=11.72,
+            text=f"AISLE {int(row.aisle_number)}",
+            showarrow=False,
+            font={"size": 11, "color": "#526579"},
+            bgcolor="white",
+            bordercolor="#dce4eb",
+            borderpad=3,
         )
+
+    layout_by_location = data.warehouse.set_index("location_id")
+    storage_x = [
+        float(row.x) + (-0.52 if row.side == "L" else 0.52)
+        for row in data.warehouse.itertuples(index=False)
+    ]
+    figure.add_trace(
+        go.Scatter(
+            x=storage_x,
+            y=data.warehouse["y"],
+            mode="markers",
+            marker={
+                "color": "#b7c3ce",
+                "size": 7,
+                "line": {"color": "white", "width": 1},
+            },
+            text=data.warehouse["location_id"],
+            name="Storage bay",
+            hovertemplate="Storage bay %{text}<extra></extra>",
+        )
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=[0, 20, None, 0, 20],
+            y=[0, 0, None, 11, 11],
+            mode="lines",
+            line={"color": "#80aeb4", "width": 2},
+            name="Cross aisle",
+            hoverinfo="skip",
+        )
+    )
     if plan.path:
         figure.add_trace(
             go.Scatter(
                 x=[point[0] for point in plan.path],
                 y=[point[1] for point in plan.path],
                 mode="lines",
-                line={"color": "#168aad", "width": 5},
-                name=f"{strategy} route",
+                line={"color": "#168aad", "width": 4},
+                name="Planned route",
                 hoverinfo="skip",
             )
         )
-    figure.add_trace(
-        go.Scatter(
-            x=data.warehouse["x"],
-            y=data.warehouse["y"],
-            mode="markers",
-            marker={
-                "color": "#aab7c4",
-                "size": 8,
-                "line": {"color": "white", "width": 1},
-            },
-            text=data.warehouse["location_id"],
-            name="Storage location",
-            hovertemplate="%{text}<extra></extra>",
+
+    corners = [plan.path[0]]
+    previous_direction = None
+    for first, second in zip(plan.path, plan.path[1:]):
+        direction = (
+            0 if second[0] == first[0] else (1 if second[0] > first[0] else -1),
+            0 if second[1] == first[1] else (1 if second[1] > first[1] else -1),
         )
-    )
-    chosen = sorted(set(plan.selected_locations.values()))
-    chosen_rows = data.warehouse[data.warehouse["location_id"].isin(chosen)]
+        if previous_direction is not None and direction != previous_direction:
+            corners.append(first)
+        previous_direction = direction
+    if plan.path:
+        corners.append(plan.path[-1])
+    arrow_x = []
+    arrow_y = []
+    arrow_symbols = []
+    for first, second in zip(corners, corners[1:]):
+        dx, dy = second[0] - first[0], second[1] - first[1]
+        arrow_x.append((first[0] + second[0]) / 2)
+        arrow_y.append((first[1] + second[1]) / 2)
+        arrow_symbols.append(
+            "triangle-right"
+            if dx > 0
+            else "triangle-left"
+            if dx < 0
+            else "triangle-up"
+            if dy > 0
+            else "triangle-down"
+        )
+    if arrow_x:
+        figure.add_trace(
+            go.Scatter(
+                x=arrow_x,
+                y=arrow_y,
+                mode="markers",
+                marker={
+                    "symbol": arrow_symbols,
+                    "size": 12,
+                    "color": "#075985",
+                    "line": {"color": "white", "width": 1},
+                },
+                name="Travel direction",
+                hoverinfo="skip",
+            )
+        )
+
+    chosen = list(plan.visit_order)
+    chosen_rows = layout_by_location.loc[chosen].copy()
+    chosen_rows["plot_x"] = [
+        float(row.x) + (-0.52 if row.side == "L" else 0.52)
+        for row in chosen_rows.itertuples()
+    ]
+    chosen_rows["step"] = [
+        location_order[location] for location in chosen_rows.index
+    ]
+    chosen_rows["pick_description"] = [
+        ", ".join(skus_by_location[location]) for location in chosen_rows.index
+    ]
     figure.add_trace(
         go.Scatter(
-            x=chosen_rows["x"],
+            x=chosen_rows["plot_x"],
             y=chosen_rows["y"],
             mode="markers+text",
             marker={
-                "color": "#f28c28",
-                "size": 15,
+                "color": "#f59e0b",
+                "size": 25,
                 "symbol": "circle",
-                "line": {"color": "white", "width": 2},
+                "line": {"color": "white", "width": 3},
             },
-            text=chosen_rows["location_id"],
-            textposition="top center",
-            textfont={"size": 10, "color": "#7c3f00"},
-            name="Selected pick",
-            hovertemplate="<b>Pick</b><br>%{text}<extra></extra>",
+            text=chosen_rows["step"].astype(str),
+            textposition="middle center",
+            textfont={"size": 11, "color": "white", "family": "Arial Black"},
+            customdata=[
+                [location, description]
+                for location, description in zip(
+                    chosen_rows.index, chosen_rows["pick_description"]
+                )
+            ],
+            name="Pick stop",
+            hovertemplate=(
+                "<b>Stop %{text}: %{customdata[0]}</b>"
+                "<br>Pick %{customdata[1]}<extra></extra>"
+            ),
         )
     )
     figure.add_trace(
@@ -288,35 +477,132 @@ with route_tab:
             y=[0],
             mode="markers+text",
             marker={
-                "color": "#2a9d8f",
-                "size": 18,
+                "color": "#0f766e",
+                "size": 20,
                 "symbol": "diamond",
                 "line": {"color": "white", "width": 2},
             },
-            text=["DEPOT"],
-            textposition="bottom right",
-            name="Depot",
+            text=["DEPOT / START"],
+            textposition="bottom left",
+            name="Depot / start & finish",
             hovertemplate="%{text}<extra></extra>",
         )
     )
+    progress_trace = len(figure.data)
+    figure.add_trace(
+        go.Scatter(
+            x=[plan.path[0][0]],
+            y=[plan.path[0][1]],
+            mode="lines",
+            line={"color": "#2a9d8f", "width": 7},
+            name="Picker's completed path",
+            hoverinfo="skip",
+        )
+    )
+    picker_trace = len(figure.data)
+    figure.add_trace(
+        go.Scatter(
+            x=[plan.path[0][0]],
+            y=[plan.path[0][1]],
+            mode="markers+text",
+            marker={
+                "color": "#102a43",
+                "size": 25,
+                "symbol": "circle",
+                "line": {"color": "white", "width": 3},
+            },
+            text=["🧍"],
+            textposition="top center",
+            textfont={"size": 22},
+            name="Picker",
+            hovertemplate="<b>Picker</b><br>Moving along the route<extra></extra>",
+        )
+    )
+    figure.frames = _route_animation_frames(
+        plan.path, progress_trace, picker_trace
+    )
     figure.update_layout(
-        height=620,
-        margin={"l": 10, "r": 10, "t": 15, "b": 10},
+        height=720,
+        margin={"l": 25, "r": 25, "t": 80, "b": 70},
+        title={
+            "text": f"{selected_order} · {strategy} picker route",
+            "x": 0.02,
+            "y": 0.98,
+            "xanchor": "left",
+            "font": {"size": 20, "color": "#102a43"},
+        },
         xaxis_title="Warehouse width",
-        yaxis_title="Aisle position",
-        yaxis={"range": [-1, 12], "scaleanchor": "x", "scaleratio": 1},
-        xaxis={"range": [-1, 20], "gridcolor": "#edf1f5"},
-        plot_bgcolor="white",
+        yaxis_title="Aisle position · picker travels vertically",
+        yaxis={"range": [-0.9, 12.35], "scaleanchor": "x", "scaleratio": 1},
+        xaxis={"range": [-1.4, 21], "dtick": 2, "showgrid": False, "zeroline": False},
+        plot_bgcolor="#f8fafc",
         paper_bgcolor="white",
         font={"color": "#334e68"},
-        legend={"orientation": "h", "y": -0.15},
+        legend={
+            "orientation": "h",
+            "y": -0.16,
+            "x": 0.5,
+            "xanchor": "center",
+        },
         hovermode="closest",
+        updatemenus=[
+            {
+                "type": "buttons",
+                "direction": "left",
+                "x": 0.02,
+                "y": 1.13,
+                "showactive": False,
+                "buttons": [
+                    {
+                        "label": "▶ Play picker",
+                        "method": "animate",
+                        "args": [
+                            None,
+                            {
+                                "frame": {"duration": 80, "redraw": True},
+                                "fromcurrent": True,
+                                "transition": {"duration": 0},
+                            },
+                        ],
+                    },
+                    {
+                        "label": "Ⅱ Pause",
+                        "method": "animate",
+                        "args": [
+                            [None],
+                            {
+                                "mode": "immediate",
+                                "frame": {"duration": 0, "redraw": False},
+                                "transition": {"duration": 0},
+                            },
+                        ],
+                    },
+                ],
+            }
+        ],
     )
-    st.plotly_chart(figure, width="stretch", config={"displayModeBar": False})
-    st.markdown(
-        "**Visit sequence:** DEPOT → "
-        + " → ".join(plan.visit_order)
-        + " → DEPOT"
+    st.plotly_chart(
+        figure,
+        width="stretch",
+        config={"displayModeBar": False},
+        key=f"route_{selected_order}_{strategy}",
+    )
+    itinerary = []
+    for location in plan.visit_order:
+        row = layout_by_location.loc[location]
+        itinerary.append(
+            {
+                "Stop": location_order[location],
+                "Aisle": f"A{int(row['aisle_number'])}",
+                "Bay": location,
+                "Pick": ", ".join(skus_by_location[location]),
+            }
+        )
+    st.subheader("Picker itinerary")
+    st.dataframe(pd.DataFrame(itinerary), hide_index=True, width="stretch")
+    st.caption(
+        f"Start at depot → {len(itinerary)} pick stops → return to depot. "
+        f"Route distance: {plan.distance:.1f} layout units."
     )
 
 with picks_tab:

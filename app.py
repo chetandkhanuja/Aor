@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from dataclasses import replace
+import tempfile
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -641,18 +642,11 @@ with picks_tab:
 with test_tab:
     st.subheader("Model test cases")
     st.caption(
-        "The first seven cases cover the supplied data and route feasibility. "
-        "The final eight cases use new or modified input data."
+        "These are new-data cases. TC-10 to TC-12 and TC-16 to TC-18 intentionally "
+        "verify that invalid input produces an error."
     )
 
     test_definitions = [
-        ("TC-01", "Load packaged inputs", "100 locations, 101x101 matrix"),
-        ("TC-02", "Cover both supplied orders with every route policy", "Complete and orthogonal routes"),
-        ("TC-03", "Solve both supplied MIP orders", "HiGHS returns optimal"),
-        ("TC-04", "Compare MIP and policy distances", "MIP is no worse"),
-        ("TC-05", "Demand exceeds all available stock", "Clear insufficient-stock error"),
-        ("TC-06", "Largest Gap with no rear picks", "No unnecessary rear traversal"),
-        ("TC-07", "Streamlit route rendering", "Dashboard renders without exceptions"),
         ("TC-08", "TEST-NEAREST: SKU01, quantity 1", "Select A1-L3; distance 10"),
         ("TC-09", "TEST-SUM: duplicate SKU01 demand 1 + 2", "Aggregate to 3; one unique visit"),
         ("TC-10", "TEST-STOCK: SKU01, quantity 4", "Insufficient-stock error"),
@@ -661,6 +655,9 @@ with test_tab:
         ("TC-13", "Shortest path: DEPOT to A1-L1", "Distance 3"),
         ("TC-14", "Shortest path: A1-L1 to A1-L10", "Distance 9"),
         ("TC-15", "Shortest path: A1-L3 to A5-L3", "Distance 22"),
+        ("TC-16", "TEST-UNKNOWN-SKU: SKU999", "No-location/unknown-SKU error"),
+        ("TC-17", "Modified inventory: available quantity -1", "Negative-inventory error"),
+        ("TC-18", "Modified matrix: missing warehouse nodes", "Missing-location error"),
     ]
 
     test_state = st.session_state.get("test_results", {})
@@ -668,9 +665,20 @@ with test_tab:
     def run_new_data_tests() -> dict[str, dict[str, str]]:
         results: dict[str, dict[str, str]] = {}
 
-        def add(test_id: str, passed: bool, evidence: str) -> None:
+        def add(
+            test_id: str,
+            passed: bool,
+            evidence: str,
+            expected_failure: bool = False,
+        ) -> None:
             results[test_id] = {
-                "Status": "PASS" if passed else "FAIL",
+                "Status": (
+                    "FAIL (EXPECTED)"
+                    if expected_failure
+                    else "PASS"
+                    if passed
+                    else "FAIL"
+                ),
                 "Evidence": evidence,
             }
 
@@ -708,13 +716,23 @@ with test_tab:
             solve_mip("TEST-STOCK", replace(data, orders=stock_orders))
             add("TC-10", False, "Expected insufficient stock, but a route was returned")
         except ValueError as error:
-            add("TC-10", "No single location" in str(error), str(error))
+            add(
+                "TC-10",
+                "No single location" in str(error),
+                str(error),
+                expected_failure=True,
+            )
 
         try:
             solve_mip("TEST-UNKNOWN", data)
             add("TC-11", False, "Expected order-not-found, but a route was returned")
         except ValueError as error:
-            add("TC-11", "TEST-UNKNOWN" in str(error), str(error))
+            add(
+                "TC-11",
+                "TEST-UNKNOWN" in str(error),
+                str(error),
+                expected_failure=True,
+            )
 
         bad_orders = pd.DataFrame(
             [{"order_id": "TEST-BAD", "sku_id": "SKU01", "demand_qty": 0}]
@@ -728,6 +746,7 @@ with test_tab:
                 "TC-12",
                 "demand quantities must be positive" in str(error),
                 str(error),
+                expected_failure=True,
             )
 
         depot_segment = _shortest_network_path((0.0, 0.0), (2.0, 1.0), data)
@@ -750,9 +769,65 @@ with test_tab:
             abs(_path_distance(cross_segment) - 22.0) < 1e-9,
             f"A1-L3 -> A5-L3 distance {_path_distance(cross_segment):.1f}",
         )
+
+        unknown_sku_orders = pd.DataFrame(
+            [{"order_id": "TEST-UNKNOWN-SKU", "sku_id": "SKU999", "demand_qty": 1}]
+        )
+        try:
+            solve_mip(
+                "TEST-UNKNOWN-SKU",
+                replace(data, orders=unknown_sku_orders),
+            )
+            add("TC-16", False, "Expected unknown-SKU rejection, but a route was returned")
+        except ValueError as error:
+            add(
+                "TC-16",
+                "No single location" in str(error),
+                str(error),
+                expected_failure=True,
+            )
+
+        with tempfile.TemporaryDirectory() as temp_directory:
+            temp_path = Path(temp_directory)
+            inventory = data.inventory.copy()
+            inventory.loc[0, "available_qty"] = -1
+            inventory.to_csv(temp_path / "inventory.csv", index=False)
+            data.orders.to_csv(temp_path / "orders.csv", index=False)
+            data.distances.to_csv(temp_path / "distance_matrix.csv")
+            try:
+                load_data(temp_path)
+                add("TC-17", False, "Expected negative-inventory rejection")
+            except ValueError as error:
+                add(
+                    "TC-17",
+                    "Inventory quantities cannot be negative" in str(error),
+                    str(error),
+                    expected_failure=True,
+                )
+
+        with tempfile.TemporaryDirectory() as temp_directory:
+            temp_path = Path(temp_directory)
+            data.inventory.to_csv(temp_path / "inventory.csv", index=False)
+            data.orders.to_csv(temp_path / "orders.csv", index=False)
+            incomplete_matrix = pd.DataFrame(
+                [[0.0, 3.0], [3.0, 0.0]],
+                index=["DEPOT", "A1-L1"],
+                columns=["DEPOT", "A1-L1"],
+            )
+            incomplete_matrix.to_csv(temp_path / "distance_matrix.csv")
+            try:
+                load_data(temp_path)
+                add("TC-18", False, "Expected missing-distance-node rejection")
+            except ValueError as error:
+                add(
+                    "TC-18",
+                    "missing warehouse locations" in str(error),
+                    str(error),
+                    expected_failure=True,
+                )
         return results
 
-    if st.button("Run TC-08 to TC-15", type="primary"):
+    if st.button("Run TC-08 to TC-18", type="primary"):
         test_state = run_new_data_tests()
         st.session_state["test_results"] = test_state
 
@@ -773,6 +848,8 @@ with test_tab:
         lambda column: [
             "background-color: #dcfce7; color: #166534"
             if value == "PASS"
+            else "background-color: #fef3c7; color: #92400e"
+            if value == "FAIL (EXPECTED)"
             else "background-color: #fee2e2; color: #991b1b"
             if value == "FAIL"
             else ""

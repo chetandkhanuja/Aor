@@ -117,6 +117,8 @@ def _order_candidates(
         .astype(int)
         .to_dict()
     )
+    if any(quantity <= 0 for quantity in demand.values()):
+        raise ValueError("Order demand quantities must be positive.")
     candidates: dict[str, list[str]] = {}
     for sku, quantity in demand.items():
         rows = data.inventory[

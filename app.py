@@ -1,6 +1,7 @@
 """Streamlit decision-support prototype for warehouse order picking."""
 
 from pathlib import Path
+from dataclasses import replace
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -9,9 +10,12 @@ import streamlit as st
 from warehouse_optimizer import (
     POLICIES,
     RoutePlan,
+    _path_distance,
+    _shortest_network_path,
     compare_order,
     load_data,
     order_ids,
+    solve_mip,
 )
 
 
@@ -178,8 +182,13 @@ metric_columns[3].metric(
     delta_color="off",
 )
 
-overview_tab, route_tab, picks_tab = st.tabs(
-    ["Strategy comparison", "Route visualization", "Pick list"]
+overview_tab, route_tab, picks_tab, test_tab = st.tabs(
+    [
+        "Strategy comparison",
+        "Route visualization",
+        "Pick list",
+        "Test cases",
+    ]
 )
 with overview_tab:
     comparison_column, note_column = st.columns([1.7, 1])
@@ -628,6 +637,150 @@ with picks_tab:
         f"{len(order_lines)} SKUs · {int(order_lines['Demand'].sum())} total units · "
         f"{len(set(plan.selected_locations.values()))} pick locations"
     )
+
+with test_tab:
+    st.subheader("Model test cases")
+    st.caption(
+        "The first seven cases cover the supplied data and route feasibility. "
+        "The final eight cases use new or modified input data."
+    )
+
+    test_definitions = [
+        ("TC-01", "Load packaged inputs", "100 locations, 101x101 matrix"),
+        ("TC-02", "Cover both supplied orders with every route policy", "Complete and orthogonal routes"),
+        ("TC-03", "Solve both supplied MIP orders", "HiGHS returns optimal"),
+        ("TC-04", "Compare MIP and policy distances", "MIP is no worse"),
+        ("TC-05", "Demand exceeds all available stock", "Clear insufficient-stock error"),
+        ("TC-06", "Largest Gap with no rear picks", "No unnecessary rear traversal"),
+        ("TC-07", "Streamlit route rendering", "Dashboard renders without exceptions"),
+        ("TC-08", "TEST-NEAREST: SKU01, quantity 1", "Select A1-L3; distance 10"),
+        ("TC-09", "TEST-SUM: duplicate SKU01 demand 1 + 2", "Aggregate to 3; one unique visit"),
+        ("TC-10", "TEST-STOCK: SKU01, quantity 4", "Insufficient-stock error"),
+        ("TC-11", "TEST-UNKNOWN: unknown order", "Order-not-found error"),
+        ("TC-12", "TEST-BAD: demand quantity 0", "Positive-demand error"),
+        ("TC-13", "Shortest path: DEPOT to A1-L1", "Distance 3"),
+        ("TC-14", "Shortest path: A1-L1 to A1-L10", "Distance 9"),
+        ("TC-15", "Shortest path: A1-L3 to A5-L3", "Distance 22"),
+    ]
+
+    test_state = st.session_state.get("test_results", {})
+
+    def run_new_data_tests() -> dict[str, dict[str, str]]:
+        results: dict[str, dict[str, str]] = {}
+
+        def add(test_id: str, passed: bool, evidence: str) -> None:
+            results[test_id] = {
+                "Status": "PASS" if passed else "FAIL",
+                "Evidence": evidence,
+            }
+
+        nearest_orders = pd.DataFrame(
+            [{"order_id": "TEST-NEAREST", "sku_id": "SKU01", "demand_qty": 1}]
+        )
+        nearest_plan = solve_mip(
+            "TEST-NEAREST", replace(data, orders=nearest_orders)
+        )
+        add(
+            "TC-08",
+            nearest_plan.selected_locations["SKU01"] == "A1-L3"
+            and abs(nearest_plan.distance - 10.0) < 1e-9,
+            f"A1-L3; distance {nearest_plan.distance:.1f}",
+        )
+
+        sum_orders = pd.DataFrame(
+            [
+                {"order_id": "TEST-SUM", "sku_id": "SKU01", "demand_qty": 1},
+                {"order_id": "TEST-SUM", "sku_id": "SKU01", "demand_qty": 2},
+            ]
+        )
+        sum_plan = solve_mip("TEST-SUM", replace(data, orders=sum_orders))
+        add(
+            "TC-09",
+            sum_plan.selected_locations["SKU01"] == "A1-L3"
+            and len(set(sum_plan.visit_order)) == 1,
+            f"A1-L3; {len(set(sum_plan.visit_order))} unique visit",
+        )
+
+        stock_orders = pd.DataFrame(
+            [{"order_id": "TEST-STOCK", "sku_id": "SKU01", "demand_qty": 4}]
+        )
+        try:
+            solve_mip("TEST-STOCK", replace(data, orders=stock_orders))
+            add("TC-10", False, "Expected insufficient stock, but a route was returned")
+        except ValueError as error:
+            add("TC-10", "No single location" in str(error), str(error))
+
+        try:
+            solve_mip("TEST-UNKNOWN", data)
+            add("TC-11", False, "Expected order-not-found, but a route was returned")
+        except ValueError as error:
+            add("TC-11", "TEST-UNKNOWN" in str(error), str(error))
+
+        bad_orders = pd.DataFrame(
+            [{"order_id": "TEST-BAD", "sku_id": "SKU01", "demand_qty": 0}]
+        )
+        bad_data = replace(data, orders=bad_orders)
+        try:
+            solve_mip("TEST-BAD", bad_data)
+            add("TC-12", False, "Expected positive-demand rejection, but a route was returned")
+        except ValueError as error:
+            add(
+                "TC-12",
+                "demand quantities must be positive" in str(error),
+                str(error),
+            )
+
+        depot_segment = _shortest_network_path((0.0, 0.0), (2.0, 1.0), data)
+        add(
+            "TC-13",
+            abs(_path_distance(depot_segment) - 3.0) < 1e-9,
+            f"DEPOT -> A1-L1 distance {_path_distance(depot_segment):.1f}",
+        )
+
+        vertical_segment = _shortest_network_path((2.0, 1.0), (2.0, 10.0), data)
+        add(
+            "TC-14",
+            abs(_path_distance(vertical_segment) - 9.0) < 1e-9,
+            f"A1-L1 -> A1-L10 distance {_path_distance(vertical_segment):.1f}",
+        )
+
+        cross_segment = _shortest_network_path((2.0, 3.0), (18.0, 3.0), data)
+        add(
+            "TC-15",
+            abs(_path_distance(cross_segment) - 22.0) < 1e-9,
+            f"A1-L3 -> A5-L3 distance {_path_distance(cross_segment):.1f}",
+        )
+        return results
+
+    if st.button("Run TC-08 to TC-15", type="primary"):
+        test_state = run_new_data_tests()
+        st.session_state["test_results"] = test_state
+
+    rows = []
+    for test_id, name, expected in test_definitions:
+        result = test_state.get(test_id)
+        rows.append(
+            {
+                "Test": test_id,
+                "Input / action": name,
+                "Expected": expected,
+                "Status": result["Status"] if result else "Not run",
+                "Evidence": result["Evidence"] if result else "",
+            }
+        )
+    test_table = pd.DataFrame(rows)
+    styled = test_table.style.apply(
+        lambda column: [
+            "background-color: #dcfce7; color: #166534"
+            if value == "PASS"
+            else "background-color: #fee2e2; color: #991b1b"
+            if value == "FAIL"
+            else ""
+            for value in column
+        ],
+        subset=["Status"],
+    )
+    st.dataframe(styled, hide_index=True, width="stretch")
 
 st.info(
     "Prototype scope: one picker, one order at a time, complete demand from "

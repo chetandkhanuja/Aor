@@ -642,22 +642,22 @@ with picks_tab:
 with test_tab:
     st.subheader("Model test cases")
     st.caption(
-        "These are new-data cases. TC-10 to TC-12 and TC-16 to TC-18 intentionally "
+        "These are new-data cases. TC-03 to TC-05 and TC-09 to TC-11 intentionally "
         "verify that invalid input produces an error."
     )
 
     test_definitions = [
-        ("TC-08", "TEST-NEAREST: SKU01, quantity 1", "Select A1-L3; distance 10"),
-        ("TC-09", "TEST-SUM: duplicate SKU01 demand 1 + 2", "Aggregate to 3; one unique visit"),
-        ("TC-10", "TEST-STOCK: SKU01, quantity 4", "Insufficient-stock error"),
-        ("TC-11", "TEST-UNKNOWN: unknown order", "Order-not-found error"),
-        ("TC-12", "TEST-BAD: demand quantity 0", "Positive-demand error"),
-        ("TC-13", "Shortest path: DEPOT to A1-L1", "Distance 3"),
-        ("TC-14", "Shortest path: A1-L1 to A1-L10", "Distance 9"),
-        ("TC-15", "Shortest path: A1-L3 to A5-L3", "Distance 22"),
-        ("TC-16", "TEST-UNKNOWN-SKU: SKU999", "No-location/unknown-SKU error"),
-        ("TC-17", "Modified inventory: available quantity -1", "Negative-inventory error"),
-        ("TC-18", "Modified matrix: missing warehouse nodes", "Missing-location error"),
+        ("TC-01", "TEST-NEAREST: SKU01, quantity 1", "Select A1-L3; distance 10"),
+        ("TC-02", "TEST-SUM: duplicate SKU01 demand 1 + 2", "Aggregate to 3; one unique visit"),
+        ("TC-03", "TEST-STOCK: SKU01, quantity 4", "Insufficient-stock error"),
+        ("TC-04", "TEST-UNKNOWN: unknown order", "Order-not-found error"),
+        ("TC-05", "TEST-BAD: demand quantity 0", "Positive-demand error"),
+        ("TC-06", "Shortest path: DEPOT to A1-L1", "Distance 3"),
+        ("TC-07", "Shortest path: A1-L1 to A1-L10", "Distance 9"),
+        ("TC-08", "Shortest path: A1-L3 to A5-L3", "Distance 22"),
+        ("TC-09", "TEST-UNKNOWN-SKU: SKU999", "No-location/unknown-SKU error"),
+        ("TC-10", "Modified inventory: available quantity -1", "Negative-inventory error"),
+        ("TC-11", "Modified matrix: missing warehouse nodes", "Missing-location error"),
     ]
 
     test_state = st.session_state.get("test_results", {})
@@ -689,7 +689,7 @@ with test_tab:
             "TEST-NEAREST", replace(data, orders=nearest_orders)
         )
         add(
-            "TC-08",
+            "TC-01",
             nearest_plan.selected_locations["SKU01"] == "A1-L3"
             and abs(nearest_plan.distance - 10.0) < 1e-9,
             f"A1-L3; distance {nearest_plan.distance:.1f}",
@@ -703,7 +703,7 @@ with test_tab:
         )
         sum_plan = solve_mip("TEST-SUM", replace(data, orders=sum_orders))
         add(
-            "TC-09",
+            "TC-02",
             sum_plan.selected_locations["SKU01"] == "A1-L3"
             and len(set(sum_plan.visit_order)) == 1,
             f"A1-L3; {len(set(sum_plan.visit_order))} unique visit",
@@ -714,10 +714,10 @@ with test_tab:
         )
         try:
             solve_mip("TEST-STOCK", replace(data, orders=stock_orders))
-            add("TC-10", False, "Expected insufficient stock, but a route was returned")
+            add("TC-03", False, "Expected insufficient stock, but a route was returned")
         except ValueError as error:
             add(
-                "TC-10",
+                "TC-03",
                 "No single location" in str(error),
                 str(error),
                 expected_failure=True,
@@ -725,10 +725,10 @@ with test_tab:
 
         try:
             solve_mip("TEST-UNKNOWN", data)
-            add("TC-11", False, "Expected order-not-found, but a route was returned")
+            add("TC-04", False, "Expected order-not-found, but a route was returned")
         except ValueError as error:
             add(
-                "TC-11",
+                "TC-04",
                 "TEST-UNKNOWN" in str(error),
                 str(error),
                 expected_failure=True,
@@ -740,10 +740,10 @@ with test_tab:
         bad_data = replace(data, orders=bad_orders)
         try:
             solve_mip("TEST-BAD", bad_data)
-            add("TC-12", False, "Expected positive-demand rejection, but a route was returned")
+            add("TC-05", False, "Expected positive-demand rejection, but a route was returned")
         except ValueError as error:
             add(
-                "TC-12",
+                "TC-05",
                 "demand quantities must be positive" in str(error),
                 str(error),
                 expected_failure=True,
@@ -751,21 +751,21 @@ with test_tab:
 
         depot_segment = _shortest_network_path((0.0, 0.0), (2.0, 1.0), data)
         add(
-            "TC-13",
+            "TC-06",
             abs(_path_distance(depot_segment) - 3.0) < 1e-9,
             f"DEPOT -> A1-L1 distance {_path_distance(depot_segment):.1f}",
         )
 
         vertical_segment = _shortest_network_path((2.0, 1.0), (2.0, 10.0), data)
         add(
-            "TC-14",
+            "TC-07",
             abs(_path_distance(vertical_segment) - 9.0) < 1e-9,
             f"A1-L1 -> A1-L10 distance {_path_distance(vertical_segment):.1f}",
         )
 
         cross_segment = _shortest_network_path((2.0, 3.0), (18.0, 3.0), data)
         add(
-            "TC-15",
+            "TC-08",
             abs(_path_distance(cross_segment) - 22.0) < 1e-9,
             f"A1-L3 -> A5-L3 distance {_path_distance(cross_segment):.1f}",
         )
@@ -778,10 +778,10 @@ with test_tab:
                 "TEST-UNKNOWN-SKU",
                 replace(data, orders=unknown_sku_orders),
             )
-            add("TC-16", False, "Expected unknown-SKU rejection, but a route was returned")
+            add("TC-09", False, "Expected unknown-SKU rejection, but a route was returned")
         except ValueError as error:
             add(
-                "TC-16",
+                "TC-09",
                 "No single location" in str(error),
                 str(error),
                 expected_failure=True,
@@ -796,10 +796,10 @@ with test_tab:
             data.distances.to_csv(temp_path / "distance_matrix.csv")
             try:
                 load_data(temp_path)
-                add("TC-17", False, "Expected negative-inventory rejection")
+                add("TC-10", False, "Expected negative-inventory rejection")
             except ValueError as error:
                 add(
-                    "TC-17",
+                    "TC-10",
                     "Inventory quantities cannot be negative" in str(error),
                     str(error),
                     expected_failure=True,
@@ -817,17 +817,17 @@ with test_tab:
             incomplete_matrix.to_csv(temp_path / "distance_matrix.csv")
             try:
                 load_data(temp_path)
-                add("TC-18", False, "Expected missing-distance-node rejection")
+                add("TC-11", False, "Expected missing-distance-node rejection")
             except ValueError as error:
                 add(
-                    "TC-18",
+                    "TC-11",
                     "missing warehouse locations" in str(error),
                     str(error),
                     expected_failure=True,
                 )
         return results
 
-    if st.button("Run TC-08 to TC-18", type="primary"):
+    if st.button("Run TC-01 to TC-11", type="primary"):
         test_state = run_new_data_tests()
         st.session_state["test_results"] = test_state
 
